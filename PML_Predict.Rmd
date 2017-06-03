@@ -1,0 +1,241 @@
+---
+title: "Predict Body Postures and Movements"
+author: "Practical Machine Learning by Andrea"
+date: "May 13, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(knitr)
+library(ggplot2)
+library(caret)
+library(gbm)
+library(randomForest)
+```
+
+# Introduction
+
+Advances in technology have made it possible to collect data about a person's activity using devices such Jawbone Up, Nike FuelBand, and Fitbit.  Individuals wearing this type of device record various types of measurements relating to physical activity.  This information can then be used to assist in improving one's health. However, while the measurements quantify how much of the physical activity was completed, the device does not quantify how well the individual did. Therefore, the goal of this project is to use the data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants to predict the manner in which they did the exercise. 
+
+More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset)."
+
+```{r retrieve-files}
+# Retrieving the Data
+target <-"pml-training.csv"
+if (!file.exists(target)) {
+   url <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+   target <- "pml-training.csv"
+   download.file(url, destfile = target)
+}
+# replace missing values and division errors with NA
+sample <-read.csv(target, header=T, sep=",", na.strings=c("NA","#DIV/0!"))
+
+target <-"pml-testing.csv"
+if (!file.exists(target)) {
+   url <-"http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+   download.file(url, destfile = target)
+}
+quiz <-read.csv(target, header=T, sep=",", na.strings=c("NA","#DIV/0!"))
+```
+## Cross Validation
+
+We learn that it is not advisable to compare the predictive accuracy of the model using the same dataset used for estimating the model.  Therefore, in order to assess the model's predictive performance, an independent set of data, the test dataset, will be used.
+
+Since this dataset appears to be medium-sized, the original dataset pml-training.csv dataset will be randomly sliced into two parts: a training set (60%) and a test set (40%).  The training set will be used to fit the models.  The test set will be used for assessment of the generalization (out-of-sample) error of the final chosen model. 
+The final prediction model will be used to predict 20 different test cases.
+
+```{r partition-dataset}
+seed <- 777
+set.seed(seed)
+#create training set indexes with 60% of data
+sample_data <-createDataPartition(y=sample$classe, p=0.6, list=FALSE)
+#subset sample data to training
+training <- sample[sample_data, ]
+#subset sample data (the rest) to test
+testing <- sample[-sample_data, ]
+#dimension of original, training, testing, and validation datasets
+rbind("original dataset" = dim(sample),"training set"=dim(training),"testing set"=dim(testing),"validation"=dim(quiz))
+```
+## Data Cleaning
+
+It is assumed that the observations with missing values are missing completely at random; therefore, columns with a large amount of missing values are discarded.  In addition, variables that have very little variability in them will be removed since they are not useful predictors.
+
+```{r missing-values}
+#count number of missing values in each dataset
+sum(is.na(training)==TRUE)
+sum(is.na(testing)==TRUE)
+#calculate the percentage of missing values in each of the variables in the original train and test datasets
+NApercentTrain <- sapply(training, function(df) {sum(is.na(df)==TRUE)/length(df)})
+NApercentTest <- sapply(testing, function(df) {sum(is.na(df)==TRUE)/length(df)})
+#remove variables that have more than 95% missing values from testing and training datasets
+colnames1 <- names(which(NApercentTrain < 0.95))
+trainingData <- training[, colnames1]
+colnames2 <- names(which(NApercentTest < 0.95))
+testingData <- testing[, colnames2]
+#Recheck for Missing Values
+#makes sure both datasets are free of missing values
+sum(is.na(trainingData)==TRUE); sum(is.na(testingData)==TRUE)
+#Remove variables that are not useful for Prediction Models
+#Identify variables that have very little variability 
+nzv_train<-nearZeroVar(trainingData,saveMetrics=TRUE)
+nzv_test<-nearZeroVar(testingData,saveMetrics=TRUE)
+#remove all variables with nzv = TRUE because predictor is a near-zero-variance predictor
+SubCleanTrainData <- trainingData[,which(nzv_train$nzv==FALSE)]
+SubCleanTestData <- testingData[,which(nzv_test$nzv==FALSE)]
+#remove x and cvtd_timestamp columns
+CleanTrainData <- SubCleanTrainData[,c(2:4,6:59)]
+CleanTestData <- SubCleanTestData[,c(2:4,6:59)]
+```
+## Prediction Model Consideration
+According to Hastie, Tibshirani, and Friedman (2009), "random forests do remarkably well, with very little tuning required" (p. 590).  This project will compare the two most widely used and accurate prediction models Random Forest and Boosting. 
+
+### Prediction using Random Forest
+```{r RandomForest}
+set.seed(seed)
+#build model on sub-training set
+model <-"rfModFit.RData"
+if (!file.exists(model)) {
+        # Start the clock!
+        my.date <- as.character(Sys.time())
+        ptm <- proc.time()
+        #fit the outcome to be classe and to use any of the other predictive variables as potential predictors
+        #modFit <- train(classe~ .,data=CleanTrainData, method="rf", prox=TRUE)
+        #use randomForest function as it is faster than train()
+        rfmodFit <- randomForest(classe~ .,data=CleanTrainData)
+        save(rfmodFit, file="rfModFit.RData")
+        proc.time() - ptm
+        my.enddate <- as.character(Sys.time())
+        my.date
+        my.enddate
+} else {
+        load(file="rfModFit.RData", verbose=FALSE)
+}
+#Evaluate with Random Forest on sub-train set to capture in-sample error
+rftrainPC <- predict(rfmodFit, CleanTrainData)
+rftrainAcc <- confusionMatrix(CleanTrainData$classe, rftrainPC)$overall
+
+#Evaluate with Random Forest on sub-test set
+rftestPC <-predict(rfmodFit,CleanTestData)
+```
+#### * <u> _**In-Sample Error**_ </u>  
+Now let's look at the error that resulted from applying the Random Forest prediction algorithm to the dataset it was built with, the train datset.  
+```{r}
+rftrainAcc[1]
+```
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;With 100% accuracy, there is no resubstitution (in-sample) error
+
+```{r RF-Accuracy, echo=FALSE}
+cmrf <- confusionMatrix(rftestPC, CleanTestData$classe)
+rftestAcc <- 1-cmrf$overall[1]
+```
+#### * <u> _**Out-of-Sample Error**_ </u>  
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Now let's look at the error that resulted from applying the Random Forest prediction algorithm to a new dataset, the test dataset.
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;The generalization (out-of-sample) error is `r rftestAcc`
+
+```{r, echo=FALSE}
+cmrfAcc <- round(cmrf$overall['Accuracy'],4)
+cmrfAcc <- cmrfAcc*100
+```
+#### Review Accuracy Results on Test Prediction (RF)
+```{r, echo=FALSE}
+cmrf
+```
+```{r, echo=FALSE}
+plot(rfmodFit)
+```
+
+### Prediction using Generalized Boosting
+```{r Boosting}
+set.seed(seed)
+#build model on sub-training set
+model <-"gbmModFit.RData"
+if (!file.exists(model)) {
+        # Start the clock!
+        gbmmy.date <- as.character(Sys.time())
+        ptm <- proc.time()
+        gbmmodFit <- train(classe~ .,data=CleanTrainData, method="gbm", verbose=FALSE)
+        save(gbmmodFit, file="gbmModFit.RData")
+        proc.time() - ptm
+        gbm.enddate <- as.character(Sys.time())
+} else {
+        load(file="gbmModFit.RData", verbose=FALSE)
+}
+```
+```{r, echo=FALSE}
+print(gbmmodFit)
+
+#Evaluate with Generalized Boosting on sub-train set to capture in-sample error
+gbmtrainPC <- predict(gbmmodFit,CleanTrainData)
+gbmtrainAcc <- confusionMatrix(CleanTrainData$classe, gbmtrainPC)$overall
+gbmtrainAccpct <- round(gbmtrainAcc[1],4)*100
+gbmtrainAccdiff <- 1-gbmtrainAcc[1]
+
+#Evaluate with Generalized Boosting on sub-test set
+gbmtestPC <-predict(gbmmodFit,CleanTestData)
+```
+```{r GBM-Accuracy, echo=FALSE}
+cmgbm <- confusionMatrix(gbmtestPC, CleanTestData$classe)
+cmgbmAcc <- round(cmgbm$overall['Accuracy'],4)
+cmgbmAcc <- cmgbmAcc*100
+gbmtestAcc <- 1-cmgbm$overall[1]
+```
+#### * <u> _**In-Sample Error**_ </u>  
+Now let's look at the error that resulted from applying the Generalized Boosting prediction algorithm to the dataset it was built with, the train datset.  
+```{r, echo=FALSE}
+gbmtrainAcc[1]
+```
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;With `r gbmtrainAccpct`% accuracy, resubstitution (in-sample) error is `r gbmtrainAccdiff`.
+
+#### * <u> _**Out-of-Sample Error**_ </u>  
+Now let's look at the error that resulted from applying the Generalized Boosting prediction algorithm to a new dataset, the test dataset.
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;The generalization (out-of-sample) error is `r gbmtestAcc`.
+
+#### Review Accuracy Results on Test Prediction (GBM)
+```{r, echo=FALSE}
+cmgbm
+```
+
+```{r, echo=FALSE}
+plot(gbmmodFit)
+```
+
+## Prediction Model Selection
+
+### The comparison of the Random Forest and Generalized Boosting models reveals that the Random Forest model at `r cmrfAcc`% is more accurate than the Generalized Boosting model at `r cmgbmAcc`%. 
+
+###Prediction using the Random Forest model will be used for Validation (the project quiz).
+
+```{r, echo=FALSE}
+# Get the same predictors and same variable type for quiz dataset
+TrainColPred <- names(CleanTrainData[, -57])
+quiz <- quiz[TrainColPred]
+quiz<- rbind(CleanTrainData[1, -57], quiz)
+quiz <-quiz[-1,]
+```
+
+## Prediction Quiz using Random Forest
+```{r quiz}
+predquiz <- predict(rfmodFit, quiz)
+names(predquiz) <- c(1:20)
+predquiz
+
+#assign path for quiz
+path <- "~/Coursera/Pratical Machine Learning/Project/Quiz"
+pml_write_files = function (x){
+        n = length(x)
+        for(i in 1:n) {
+                filename = paste0("problem_id_",i,".txt")
+                write.table(x[i],file=file.path(path, filename),quote=FALSE,row.names=FALSE,col.names=FALSE)
+        }
+}
+pml_write_files(predquiz)
+```
+
+Prediction on Quiz dataset resulted in 100% Accuracy.
+
+### References
+Hastie, T., Tibshirani, R., & Friedman, J. H. (2009). The elements of statistical learning data mining, inference, and prediction (2nd ed.). New York, NY: Springer.
